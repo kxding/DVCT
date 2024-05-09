@@ -12,8 +12,8 @@ def inversion_free_add_noise(
     # 实现 DDCM 的 scheduler 支持一步加噪到任何时间步
     if noise is None:
         noise = torch.randn_like(latents)
-    alpha = model.model.scheduler.alphas_cumprod[time_step]
-    noised_latents = alpha ** 0.5 * latents + (1 - alpha) ** 0.5 * noise
+    alpha = model.scheduler.alphas_cumprod[time_step]
+    noised_latents = alpha ** 0.5 * latents.to(model.device) + (1 - alpha) ** 0.5 * noise.to(model.device)
     return noised_latents
 
 
@@ -23,9 +23,9 @@ def inversion_free_get_delta(
         z_t,
         t,
 ):
-    alpha = model.model.scheduler.alphas_cumprod[t]
+    alpha = model.scheduler.alphas_cumprod[t]
     beta = 1 - alpha
-    delta = (z_t - alpha ** 0.5 * z_0) / beta ** 0.5
+    delta = (z_t.to(model.device) - alpha ** 0.5 * z_0.to(model.device)) / beta ** 0.5
     return delta
 
 
@@ -35,9 +35,9 @@ def inversion_free_denoise(
         t,
         noise_pred,
 ):
-    alpha = model.model.scheduler.alphas_cumprod[t]
+    alpha = model.scheduler.alphas_cumprod[t]
     beta = 1 - alpha
-    z_0 = (z_t - beta ** 0.5 * noise_pred) / alpha ** 0.5
+    z_0 = (z_t.to(model.device) - beta ** 0.5 * noise_pred) / alpha ** 0.5
     return z_0
 
 
@@ -68,7 +68,16 @@ def gen_direction_weights(
             _delta_weights_ref = 1 - _delta_weights_src
         else:
             raise ValueError("Invalid mode")
+    elif inclination == "none-tar":
+        _delta_weights_src = torch.ones(time_step)
+        _delta_weights_ref = torch.zeros(time_step)
+    elif inclination == "none-src":
+        _delta_weights_src = torch.zeros(time_step)
+        _delta_weights_ref = torch.ones(time_step)
     elif inclination == "none":
+        _delta_weights_src = torch.zeros(time_step)
+        _delta_weights_ref = torch.zeros(time_step)
+    elif inclination == "both":
         _delta_weights_src = torch.ones(time_step)
         _delta_weights_ref = torch.ones(time_step)
     else:
@@ -76,6 +85,7 @@ def gen_direction_weights(
     return _delta_weights_src, _delta_weights_ref
 
 
+@torch.no_grad()
 def diffusion_noise_pred(
         model: StableDiffusionPipeline,
         noised_latent,
@@ -83,12 +93,13 @@ def diffusion_noise_pred(
         embedding,
         cfg_guidance,
 ):
-    noised_latents = torch.concat([noised_latent] * 2)
+    noised_latents = torch.concat([noised_latent] * 2).to(model.device)
     noise_pred = model.unet(noised_latents, time_step, encoder_hidden_states=embedding)['sample']
     noise_pred_uc, noise_pred_c = noise_pred.chunk(2)
     return noise_pred_uc + cfg_guidance * (noise_pred_c - noise_pred_uc)
 
 
+@torch.no_grad()
 def gen_inversion_free(
         model: StableDiffusionPipeline,
         src_origin_latent,
@@ -132,8 +143,8 @@ def gen_inversion_free(
     init_tar_pred = diffusion_noise_pred(model, init_noised_tar_latent, init_time_step, tar_embeddings, cfg_guidance)
     init_src_direction = init_src_pred - init_src_delta
     init_tar_direction = init_tar_pred - init_tar_delta
-    init_noise_pred = (init_tar_pred - src_weights[-num_inference_steps] * src_coef * init_src_direction
-                       - tar_weights[-num_inference_steps] * tar_coef * init_tar_direction)
+    init_noise_pred = (init_tar_pred - src_weights[0] * src_coef * init_src_direction
+                       - tar_weights[0] * tar_coef * init_tar_direction)
     tar_latent = inversion_free_denoise(model, init_noised_tar_latent, init_time_step, init_noise_pred)
     all_latents = []
     if return_all:
@@ -142,14 +153,14 @@ def gen_inversion_free(
     # Iterations
     tar_noise = src_noise = torch.randn_like(tar_latent)
     for i, step in enumerate(tqdm(model.scheduler.timesteps[-num_inference_steps + 1:])):
-        src_weight_t = src_weights[-num_inference_steps + 1 + i]
-        tar_weight_t = tar_weights[-num_inference_steps + 1 + i]
+        src_weight_t = src_weights[1 + i]
+        tar_weight_t = tar_weights[1 + i]
         noised_src_latent_t = inversion_free_add_noise(model, src_latent, step, src_noise)
         noised_tar_latent_t = inversion_free_add_noise(model, tar_latent, step, tar_noise)
         src_pred_t = diffusion_noise_pred(model, noised_src_latent_t, step, src_embeddings, cfg_guidance)
         tar_pred_t = diffusion_noise_pred(model, noised_tar_latent_t, step, tar_embeddings, cfg_guidance)
-        src_delta_t = inversion_free_get_delta(model, src_origin_latent, src_pred_t, step)
-        tar_delta_t = inversion_free_get_delta(model, tar_origin_latent, tar_pred_t, step)
+        src_delta_t = inversion_free_get_delta(model, src_origin_latent, noised_src_latent_t, step)
+        tar_delta_t = inversion_free_get_delta(model, tar_origin_latent, noised_tar_latent_t, step)
         src_direction_t = src_pred_t - src_delta_t
         tar_direction_t = tar_pred_t - tar_delta_t
         noise_pred_t = (tar_pred_t - src_weight_t * src_coef * src_direction_t
@@ -163,4 +174,4 @@ def gen_inversion_free(
     if return_all:
         return all_latents
     else:
-        return torch.concat([src_latent, tar_latent])
+        return torch.cat([src_latent.to(model.device), tar_latent])
