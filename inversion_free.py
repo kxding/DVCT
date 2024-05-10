@@ -1,7 +1,8 @@
 from diffusers import StableDiffusionPipeline
 import torch
 from tqdm import tqdm
-
+from utils import register_attention_control
+import copy
 
 def inversion_free_add_noise(
         model,
@@ -96,7 +97,8 @@ def diffusion_noise_pred(
     noised_latents = torch.concat([noised_latent] * 2).to(model.device)
     noise_pred = model.unet(noised_latents, time_step, encoder_hidden_states=embedding)['sample']
     noise_pred_uc, noise_pred_c = noise_pred.chunk(2)
-    return noise_pred_uc + cfg_guidance * (noise_pred_c - noise_pred_uc)
+    noise_pred = noise_pred_uc + cfg_guidance * (noise_pred_c - noise_pred_uc)
+    return noise_pred
 
 
 @torch.no_grad()
@@ -113,6 +115,8 @@ def gen_inversion_free(
         src_coef=0.5,
         tar_coef=0.5,
         return_all=False,
+        controller=None,
+        model_2=None,
 ):
     # add null embedding
     null_text_input = model.tokenizer(
@@ -128,24 +132,39 @@ def gen_inversion_free(
     src_weights, tar_weights = gen_direction_weights(inclination, mode, num_inference_steps)
 
     # set latents for iterations
-    src_latent = src_origin_latent
+    src_latent = src_origin_latent.to(model.device)
     tar_latent = src_latent.clone().detach()
 
     # set the alphas for DDCM
     model.scheduler.set_timesteps(num_inference_steps)
+    if model_2 is not None:
+        model_2 = model_2.to(model.device)
+        model_2.scheduler.set_timesteps(num_inference_steps)
+
+    model_src = model
+    model_tar = model_src if model_2 is None else model_2
+
+    if controller is not None:
+        register_attention_control(model_src, controller)
+        if model_2 is not None:
+            register_attention_control(model_tar, controller)
 
     # Init
     init_noised_tar_latent = init_noised_src_latent = torch.randn_like(tar_latent)
     init_time_step = model.scheduler.timesteps[-num_inference_steps]
     init_src_delta = inversion_free_get_delta(model, src_origin_latent, init_noised_src_latent, init_time_step)
     init_tar_delta = inversion_free_get_delta(model, tar_origin_latent, init_noised_tar_latent, init_time_step)
-    init_src_pred = diffusion_noise_pred(model, init_noised_src_latent, init_time_step, src_embeddings, cfg_guidance)
-    init_tar_pred = diffusion_noise_pred(model, init_noised_tar_latent, init_time_step, tar_embeddings, cfg_guidance)
+    init_src_pred = diffusion_noise_pred(model_src, init_noised_src_latent, init_time_step, src_embeddings,
+                                         cfg_guidance)
+    init_tar_pred = diffusion_noise_pred(model_tar, init_noised_tar_latent, init_time_step, tar_embeddings,
+                                         cfg_guidance)
     init_src_direction = init_src_pred - init_src_delta
     init_tar_direction = init_tar_pred - init_tar_delta
     init_noise_pred = (init_tar_pred - src_weights[0] * src_coef * init_src_direction
                        - tar_weights[0] * tar_coef * init_tar_direction)
     tar_latent = inversion_free_denoise(model, init_noised_tar_latent, init_time_step, init_noise_pred)
+    if controller is not None:
+        tar_latent = controller.step_callback(torch.cat([src_latent, tar_latent]))[1:]
     all_latents = []
     if return_all:
         all_latents = [tar_latent]
@@ -157,8 +176,8 @@ def gen_inversion_free(
         tar_weight_t = tar_weights[1 + i]
         noised_src_latent_t = inversion_free_add_noise(model, src_latent, step, src_noise)
         noised_tar_latent_t = inversion_free_add_noise(model, tar_latent, step, tar_noise)
-        src_pred_t = diffusion_noise_pred(model, noised_src_latent_t, step, src_embeddings, cfg_guidance)
-        tar_pred_t = diffusion_noise_pred(model, noised_tar_latent_t, step, tar_embeddings, cfg_guidance)
+        src_pred_t = diffusion_noise_pred(model_src, noised_src_latent_t, step, src_embeddings, cfg_guidance, )
+        tar_pred_t = diffusion_noise_pred(model_tar, noised_tar_latent_t, step, tar_embeddings, cfg_guidance, )
         src_delta_t = inversion_free_get_delta(model, src_origin_latent, noised_src_latent_t, step)
         tar_delta_t = inversion_free_get_delta(model, tar_origin_latent, noised_tar_latent_t, step)
         src_direction_t = src_pred_t - src_delta_t
@@ -166,6 +185,8 @@ def gen_inversion_free(
         noise_pred_t = (tar_pred_t - src_weight_t * src_coef * src_direction_t
                         - tar_weight_t * tar_coef * tar_direction_t)
         tar_latent = inversion_free_denoise(model, noised_tar_latent_t, step, noise_pred_t)
+        if controller is not None:
+            tar_latent = controller.step_callback(torch.cat([src_latent, tar_latent]))[1:]
         tar_noise = tar_pred_t
         src_noise = src_pred_t
         if return_all:
