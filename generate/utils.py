@@ -47,12 +47,12 @@ def img2latent(img_path, model: StableDiffusionPipeline, device):
 
 @torch.no_grad()
 def latent2img(latent, model: StableDiffusionPipeline):
-    latent = 1 / 0.18215 * latent
+    latent = 1 / 0.18215 * latent.unsqueeze(0)
     image = model.vae.decode(latent)['sample']
     image = (image / 2 + 0.5).clamp(0, 1)
     image = image.cpu().permute(0, 2, 3, 1).numpy()
     image = (image * 255).astype(np.uint8)
-    return Image.fromarray(image[1])
+    return Image.fromarray(image[0])
 
 
 def register_attention_control(model, controller):
