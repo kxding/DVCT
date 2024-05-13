@@ -187,3 +187,33 @@ def view_images(images, num_rows=1, offset_ratio=0.02, is_display=True):
         display(pil_img)
     else:
         return pil_img
+
+
+def add_tokens(tokenizer, text_encoder, placeholder_token, num_vec_per_token=1, initializer_token=None, use_neg=False):
+    """
+    Add tokens to the tokenizer and set the initial value of token embeddings
+    """
+    tokenizer.add_placeholder_tokens(placeholder_token, num_vec_per_token=num_vec_per_token)
+    text_encoder.resize_token_embeddings(len(tokenizer))
+    token_embeds = text_encoder.get_input_embeddings().weight.data
+    placeholder_token_ids = tokenizer.encode(placeholder_token, add_special_tokens=False)
+    print(f"number of placeholder tokens are: {len(placeholder_token_ids)}")
+    if initializer_token:
+        token_ids = tokenizer.encode(initializer_token, add_special_tokens=False)
+        for i, placeholder_token_id in enumerate(placeholder_token_ids):
+
+            token_embeds[placeholder_token_id] = token_embeds[token_ids[i * len(token_ids) // num_vec_per_token]]
+            if use_neg:
+                token_embeds[placeholder_token_id] += torch.randn_like(token_embeds[placeholder_token_id]) * 1e-3
+    else:
+        for i, placeholder_token_id in enumerate(placeholder_token_ids):
+            token_embeds[placeholder_token_id] = torch.randn_like(token_embeds[placeholder_token_id])
+
+
+def load_multitoken_tokenizer(tokenizer, text_encoder, pos_learned_embeds_dict, pos_placeholder_token):
+    num_vec_pos_token = pos_learned_embeds_dict[pos_placeholder_token].shape[0]
+    add_tokens(tokenizer, text_encoder, pos_placeholder_token, num_vec_per_token=num_vec_pos_token)
+    pos_placeholder_token_ids = tokenizer.encode(pos_placeholder_token, add_special_tokens=False)
+    token_embeds = text_encoder.get_input_embeddings().weight.data
+    for i, placeholder_token_id in enumerate(pos_placeholder_token_ids):
+        token_embeds[placeholder_token_id] = pos_learned_embeds_dict[pos_placeholder_token][i]

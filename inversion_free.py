@@ -2,7 +2,6 @@ from diffusers import LatentConsistencyModelPipeline
 import torch
 from tqdm import tqdm
 from utils import register_attention_control
-import copy
 
 
 def inversion_free_add_noise(
@@ -131,6 +130,10 @@ def gen_inversion_free(
 
     # generate weights
     src_weights, tar_weights = gen_direction_weights(inclination, mode, num_inference_steps)
+    print("src weight")
+    print(src_weights)
+    print("tar weight")
+    print(tar_weights)
 
     # set latents for iterations
     src_latent = src_origin_latent.to(model.device)
