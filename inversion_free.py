@@ -121,7 +121,7 @@ def gen_inversion_free(
     # add null embedding
     null_text_input = model.tokenizer(
         [""], padding="max_length",
-        max_length=model.tokenizer.model_max_length,
+        max_length=src_embeddings.shape[1],
         return_tensors="pt", truncation=True,
     )
     null_embeddings = model.text_encoder(null_text_input.input_ids.to(model.device))[0]
@@ -174,7 +174,6 @@ def gen_inversion_free(
         tar_direction_t = tar_pred_t - tar_delta_t
         noise_pred_t = (tar_pred_t - src_weight_t * src_coef * src_direction_t
                         - tar_weight_t * tar_coef * tar_direction_t)
-        # noise_pred_t = tar_pred_t
         tar_latent = inversion_free_denoise(model, noised_tar_latent_t, step, noise_pred_t)
         if controller is not None:
             tar_latent = controller.step_callback(tar_latent)
@@ -186,3 +185,41 @@ def gen_inversion_free(
         return all_latents
     else:
         return torch.cat([src_latent.to(model.device), tar_latent])
+
+@torch.no_grad()
+def gen_inversion_free_test(
+        model: DiffusionPipeline,
+        src_origin_latent,
+        tar_embeddings,
+        tar_uncond_embeddings,
+        num_inference_steps=100,
+        cfg_guidance=0.7,
+        return_all=False,
+):
+    tar_context = torch.concat([tar_uncond_embeddings, tar_embeddings]).to(model.device)
+
+    tar_latent = src_origin_latent.to(model.device)
+
+    # set the alphas for DDCM
+    model.scheduler.set_timesteps(num_inference_steps)
+
+    all_latents = []
+    if return_all:
+        all_latents = [tar_latent]
+
+    # Iterations
+    tar_noise = torch.randn_like(tar_latent)
+    for i, step in enumerate(tqdm(model.scheduler.timesteps[-num_inference_steps:])):
+        noised_tar_latent_t = inversion_free_add_noise(model, tar_latent, step, tar_noise)
+        tar_pred_t = diffusion_noise_pred(model, noised_tar_latent_t,
+                                          step, tar_context, cfg_guidance)
+        noise_pred_t = tar_pred_t
+        tar_latent = inversion_free_denoise(model, noised_tar_latent_t, step, noise_pred_t)
+        tar_noise = noise_pred_t
+        if return_all:
+            all_latents.append(tar_latent)
+
+    if return_all:
+        return all_latents
+    else:
+        return torch.cat([tar_latent.to(model.device), tar_latent])

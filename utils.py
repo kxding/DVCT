@@ -40,7 +40,8 @@ def img2latent(img_path, model: StableDiffusionPipeline):
         if type(image) is torch.Tensor and image.dim() == 4:
             latents = image
         else:
-            image = torch.from_numpy(image).float() / 127.5 - 1
+            image = torch.from_numpy(image).to(dtype=torch.float16) / 127.5 - 1
+            image = image.to(model.device)
             image = image.permute(2, 0, 1).unsqueeze(0)
             latents = model.vae.encode(image)['latent_dist'].mean
             latents = latents * 0.18215
